@@ -1,142 +1,78 @@
 #!/bin/sh /etc/rc.common
-# Скрипт инициализации OlcRTC для OpenWRT
-# Часть проекта OlcRTC-OpenWRT
 
+START=99
 USE_PROCD=1
-START=95
-STOP=10
 
-PIDFILE=/var/run/olcrtc.pid
-LOGTAG="olcrtc"
+validate_section_olcrtc() {
+	uci_get_by_type() {
+		local type="$1"
+		local option="$2"
+		local default="$3"
+		uci -q get olcrtc.@$type[0].$option 2>/dev/null || echo "$default"
+	}
+
+	local enabled=$(uci_get_by_type global enabled 0)
+	[ "$enabled" = "1" ] || return 1
+
+	local provider=$(uci_get_by_type global provider "jitsi")
+	local transport=$(uci_get_by_type global transport "datachannel")
+	local jitsi_url=$(uci_get_by_type global jitsi_url "https://meet.small-dm.ru")
+	local room_id=$(uci_get_by_type global room_id "")
+	local key=$(uci_get_by_type global key "")
+	local vp8_fps=$(uci_get_by_type global vp8_fps "30")
+	local vp8_batch=$(uci_get_by_type global vp8_batch "64")
+	local video_w=$(uci_get_by_type global video_w "1080")
+	local video_h=$(uci_get_by_type global video_h "1080")
+	local video_bitrate=$(uci_get_by_type global video_bitrate "5000k")
+	local socks_host=$(uci_get_by_type global socks_host "127.0.0.1")
+	local socks_port=$(uci_get_by_type global socks_port "1080")
+
+	[ -z "$room_id" ] || [ -z "$key" ] && return 1
+
+	# Генерируем YAML конфиг для актуального OlcRTC
+	cat << YAMLEOF > /tmp/olcrtc.yaml
+mode: cnc
+provider: $provider
+transport: $transport
+jitsi:
+  url: "$jitsi_url"
+  room: "$room_id"
+  key: "$key"
+video:
+  width: $video_w
+  height: $video_h
+  bitrate: "$video_bitrate"
+vp8:
+  fps: $vp8_fps
+  batch: $vp8_batch
+socks:
+  host: "$socks_host"
+  port: $socks_port
+YAMLEOF
+	return 0
+}
 
 start_service() {
-    local binary carrier transport room_id client_id key
-    local socks_host socks_port socks_user socks_pass dns debug
-    local vp8_fps vp8_batch
-    local sei_fps sei_batch sei_frag sei_ack_ms
-    local video_codec video_w video_h video_fps video_bitrate video_hw
-    local video_qr_recovery video_qr_size video_tile_module video_tile_rs ffmpeg_bin
+	validate_section_olcrtc || {
+		echo "OlcRTC: Не включен или не настроен (проверьте room_id и key)"
+		return 1
+	}
 
-    binary='/usr/bin/olcrtc'
-
-    config_load olcrtc
-    config_get carrier          config carrier          'telemost'
-    config_get transport        config transport        'vp8channel'
-    config_get room_id          config room_id          ''
-    config_get client_id        config client_id        ''
-    config_get key              config key              ''
-    config_get socks_host       config socks_host       '0.0.0.0'
-    config_get socks_port       config socks_port       '1080'
-    config_get socks_user       config socks_user       ''
-    config_get socks_pass       config socks_pass       ''
-    config_get dns              config dns              '1.1.1.1:53'
-    config_get debug            config debug            '0'
-    config_get vp8_fps          config vp8_fps          '25'
-    config_get vp8_batch        config vp8_batch        '1'
-    config_get sei_fps          config sei_fps          '60'
-    config_get sei_batch        config sei_batch        '64'
-    config_get sei_frag         config sei_frag         '900'
-    config_get sei_ack_ms       config sei_ack_ms       '2000'
-    config_get video_codec      config video_codec      'qrcode'
-    config_get video_w          config video_w          '1920'
-    config_get video_h          config video_h          '1080'
-    config_get video_fps        config video_fps        '30'
-    config_get video_bitrate    config video_bitrate    '2M'
-    config_get video_hw         config video_hw         'none'
-    config_get video_qr_recovery config video_qr_recovery 'low'
-    config_get video_qr_size    config video_qr_size    '0'
-    config_get video_tile_module config video_tile_module '4'
-    config_get video_tile_rs    config video_tile_rs    '20'
-    config_get ffmpeg_bin       config ffmpeg           'ffmpeg'
-
-    if [ -z "$room_id" ] || [ -z "$key" ]; then
-        logger -t "$LOGTAG" "Ошибка: не заданы Room ID или ключ — запуск невозможен"
-        return 1
-    fi
-
-    if [ -z "$client_id" ]; then
-        logger -t "$LOGTAG" "Ошибка: не задан Client ID — запуск невозможен"
-        return 1
-    fi
-
-    if [ ! -x "$binary" ]; then
-        logger -t "$LOGTAG" "Ошибка: бинарник $binary не найден или не исполняемый"
-        return 1
-    fi
-
-    logger -t "$LOGTAG" "Запуск клиента: binary=$binary carrier=$carrier transport=$transport порт=$socks_port"
-
-    procd_open_instance
-    procd_set_param command "$binary" \
-        -mode cnc \
-        -carrier "$carrier" \
-        -transport "$transport" \
-        -id "$room_id" \
-        -client-id "$client_id" \
-        -key "$key" \
-        -link direct \
-        -data data \
-        -dns "$dns" \
-        -socks-host "$socks_host" \
-        -socks-port "$socks_port"
-
-    [ -n "$socks_user" ] && procd_append_param command -socks-user "$socks_user"
-    [ -n "$socks_pass" ] && procd_append_param command -socks-pass "$socks_pass"
-    [ "$debug" = "1" ]   && procd_append_param command --debug
-
-    case "$transport" in
-        vp8channel)
-            procd_append_param command \
-                -vp8-fps "$vp8_fps" \
-                -vp8-batch "$vp8_batch"
-            ;;
-        seichannel)
-            procd_append_param command \
-                -fps "$sei_fps" \
-                -batch "$sei_batch" \
-                -frag "$sei_frag" \
-                -ack-ms "$sei_ack_ms"
-            ;;
-        videochannel)
-            procd_append_param command \
-                -video-codec "$video_codec" \
-                -video-w "$video_w" \
-                -video-h "$video_h" \
-                -video-fps "$video_fps" \
-                -video-bitrate "$video_bitrate" \
-                -video-hw "$video_hw" \
-                -ffmpeg "$ffmpeg_bin"
-            case "$video_codec" in
-                qrcode)
-                    procd_append_param command \
-                        -video-qr-recovery "$video_qr_recovery" \
-                        -video-qr-size "$video_qr_size"
-                    ;;
-                tile)
-                    procd_append_param command \
-                        -video-tile-module "$video_tile_module" \
-                        -video-tile-rs "$video_tile_rs"
-                    ;;
-            esac
-            ;;
-    esac
-
-    procd_set_param respawn 3600 5 0
-    procd_set_param stdout 1
-    procd_set_param stderr 1
-    procd_set_param pidfile "$PIDFILE"
-    procd_close_instance
+	procd_open_instance
+	procd_set_param command /usr/bin/olcrtc /tmp/olcrtc.yaml
+	procd_set_param respawn
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
 }
 
 stop_service() {
-    logger -t "$LOGTAG" "Остановка клиента"
+	rm -f /tmp/olcrtc.yaml
+	procd_kill olcrtc
 }
 
-service_triggers() {
-    procd_add_reload_trigger "olcrtc"
-}
-
-reload_service() {
-    stop
-    start
+restart() {
+	stop
+	sleep 2
+	start
 }
